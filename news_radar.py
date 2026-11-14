@@ -14,17 +14,24 @@
     3 — ТЕСТ TELEGRAM: отправить «радар подключён» (проверка токена и chat_id из .env).
     4 — ОДНА ПРОВЕРКА СЕЙЧАС: сразу опросить источники и показать результат.
     5 — СБРОС ИСТОРИИ: стереть базу находок (спросит «да/нет»).
+    6 — ПРОВЕРКА ИСТОЧНИКОВ: какие сайты и каналы реально отдают новости (без уведомлений).
     0 — ВЫХОД: единственный способ закрыть программу (радар при этом остановится).
 
 После каждого действия меню появляется снова: программа сама не закрывается.
 Цифру можно передать и сразу: python news_radar.py 2 (выполнит и покажет меню).
-Старые команды тоже работают: --once, --dashboard, --demo, --test-telegram, --reset-db
+Старые команды тоже работают: --once, --dashboard, --demo, --test-telegram, --reset-db,
+а также новая --check-sources.
 Перед первым запуском: pip install -r requirements.txt
+
+ДОСТОВЕРНОСТЬ. У каждого источника в config.yaml есть доверие (trust 1..5) и тип (kind):
+официальные источники (власть) получают бонус к баллу, «народные» каналы — небольшой
+штраф и пометку «не подтверждено, перепроверьте». Если новость из народного канала потом
+подтверждает надёжный источник, радар присылает отдельное сообщение «подтверждено».
 
 Кнопки и команды бота в Telegram (работают, пока радар запущен): /top /history /latest /sources /status /demo /help
 
-Настройки — в config.yaml (создаётся автоматически при первом запуске).
-Секреты (токен бота) — в файле .env, см. .env.example.
+Настройки — в config.yaml (лежит рядом с этим файлом).
+Секреты (токен бота) — в файле .env, см. env.example.
 """
 
 import argparse
@@ -83,216 +90,20 @@ BROWSER_HEADERS = {
 # Парсер HTML: lxml быстрее, но если не установлен, работает встроенный
 HTML_PARSER = "lxml" if importlib.util.find_spec("lxml") else "html.parser"
 
-# Состояние источников для дашборда: {имя: {"time", "count", "error"}}
+# Состояние источников для дашборда: {имя: {"time", "count", "error", "trust", "kind"}}
 SOURCE_STATUS = {}
 LAST_CYCLE = {"time": None}
 DEMO_SOURCE = "Демо-источник"  # демо-новости в истории не хранятся
 
-DEFAULT_CONFIG = r"""
-# ===== Настройки новостного радара =====
+# Типы источников (для вывода): official — власть, media — СМИ,
+# community — «народный» канал, author — личный канал/блог
+KIND_RU = {
+    "official": "власть",
+    "media": "СМИ",
+    "community": "народный канал",
+    "author": "личный канал",
+}
 
-# Как часто проверять источники, минут
-interval_minutes: 15
-
-# Минимальный балл, начиная с которого редактору приходит уведомление
-notify_min_score: 35
-
-# Отбор по теме: если в тексте нет достаточно «новостных» слов (сумма баллов темы
-# меньше min_topic_score), балл не поднимается выше no_topic_cap. Это отсекает
-# афиши, поздравления и прочие записи, где просто упомянут Сургут.
-min_topic_score: 6
-no_topic_cap: 30
-
-# Сколько дней хранить и учитывать историю при удалении дублей
-history_days: 7
-
-# Уникальных находок в одном уведомлении (анти-спам пачками)
-max_alerts_per_cycle: 10
-
-# Сколько часов ждать, если Telegram временно недоступен: неотправленные находки
-# уйдут при следующей проверке (а не потеряются)
-pending_hours: 12
-
-# Как считать «тот же новостной повод» (0-100): чем выше, тем строже
-dup_threshold: 75
-
-# Первый запуск только запоминает текущие новости и не шлёт уведомления
-# (чтобы редактору не прилетели старые). Для демо поставьте false.
-baseline_on_first_run: true
-
-# Telegram-бот: токен и chat_id храним в файле .env (см. env.example),
-# сюда ничего вписывать не нужно. Без токена находки печатаются в консоль.
-telegram:
-  bot_token: ""
-  chat_id: ""
-
-# Вес географии (находим подстроку в тексте; большее число = важнее)
-geo_weights:
-  сургут: 40
-  "ханты-мансийск": 25
-  югра: 25
-  "хмао": 25
-  нижневартовск: 15
-  нефтеюганск: 10
-  когалым: 10
-  "невъюганск": 10
-  лангепас: 10
-  пывара: 10
-  "мейрог": 0
-
-# Темы и ключевые слова с весами. Слово ищется как подстрока без учёта регистра.
-categories:
-  "ЧС и происшествия":
-    weight: 1.4
-    words:
-      - {word: "пожар", w: 12}
-      - {word: "дтп", w: 10}
-      - {word: "авария", w: 10}
-      - {word: "эвакуац", w: 12}
-      - {word: "эвакуир", w: 12}
-      - {word: "погиб", w: 14}
-      - {word: "пострадал", w: 12}
-      - {word: "пропал", w: 10}
-      - {word: "угроза", w: 8}
-      - {word: "отключен", w: 7}
-      - {word: "энергосб", w: 7}
-      - {word: "разлив нефт", w: 12}
-      - {word: "взрыв", w: 14}
-      - {word: "обрушен", w: 12}
-      - {word: "подтоплен", w: 10}
-      - {word: "паводок", w: 10}
-      - {word: "метел", w: 6}
-      - {word: "аномальн", w: 8}
-      - {word: "ограничен", w: 5}
-  "Правопорядок":
-    weight: 1.3
-    words:
-      - {word: "задержа", w: 10}
-      - {word: "полици", w: 6}
-      - {word: "следственн", w: 8}
-      - {word: "возбужд", w: 9}
-      - {word: "уголовн", w: 9}
-      - {word: "приговор", w: 9}
-      - {word: "суд", w: 6}
-      - {word: "наркот", w: 9}
-      - {word: "мошенн", w: 9}
-      - {word: "убийств", w: 14}
-      - {word: "ограблен", w: 10}
-      - {word: "подозреваем", w: 6}
-      - {word: "краж", w: 7}
-  "Власть и решения":
-    weight: 1.2
-    words:
-      - {word: "мэр", w: 8}
-      - {word: "глава города", w: 8}
-      - {word: "губернатор", w: 8}
-      - {word: "дума", w: 6}
-      - {word: "бюджет", w: 8}
-      - {word: "выборы", w: 7}
-      - {word: "распоряжение", w: 6}
-      - {word: "постановлен", w: 6}
-  "Деньги и экономика":
-    weight: 1.1
-    words:
-      - {word: "тариф", w: 8}
-      - {word: "налог", w: 7}
-      - {word: "инвест", w: 7}
-      - {word: "стройк", w: 6}
-      - {word: "реконструкц", w: 6}
-      - {word: "тендер", w: 5}
-      - {word: "закупк", w: 5}
-  "Транспорт и город":
-    weight: 1.1
-    words:
-      - {word: "дорог", w: 7}
-      - {word: "ремонт", w: 5}
-      - {word: "маршрут", w: 7}
-      - {word: "автобус", w: 6}
-      - {word: "перекры", w: 8}
-      - {word: "мост", w: 7}
-      - {word: "объезд", w: 7}
-  "ЖКХ и инфраструктура":
-    weight: 1.1
-    words:
-      - {word: "жкх", w: 7}
-      - {word: "отоплен", w: 7}
-      - {word: "водопровод", w: 7}
-      - {word: "текстком", w: 5}
-      - {word: "электроэнерг", w: 6}
-  "Общество и события":
-    weight: 0.8
-    words:
-      - {word: "школ", w: 5}
-      - {word: "детск", w: 5}
-      - {word: "больниц", w: 6}
-      - {word: "вакцин", w: 6}
-      - {word: "эпидем", w: 8}
-      - {word: "субсиди", w: 6}
-
-# Штрафы за «шум»: дайджесты, афиши, поздравления, конкурсы и советы обычно
-# не повод для срочного материала.
-# Отрицательное число вычитается из балла (слово ищется с начала слова).
-noise_words:
-  # --- старые ---
-  - {word: "за неделю", w: -20}
-  - {word: "дайджест", w: -20}
-  - {word: "итоги недели", w: -20}
-  - {word: "куда сходить", w: -20}
-  - {word: "афиша", w: -15}
-  - {word: "поздравл", w: -15}
-  - {word: "график работы", w: -10}
-  - {word: "режим работы", w: -10}
-  # --- новые (убирают ложные срабатывания вроде «турнир среди пожарных») ---
-  - {word: "турнир", w: -25}
-  - {word: "конкурс", w: -20}
-  - {word: "фестивал", w: -20}
-  - {word: "как провести", w: -25}
-  - {word: "советы", w: -20}
-  - {word: "викторин", w: -20}
-
-# Источники. type: rss | html | telegram
-# priority 1..5: добавляет priority*3 к баллу.
-# geo_hint: базовая география источника (ключ из geo_weights), если в тексте нет названия города.
-sources:
-  - name: СИА-ПРЕСС (RSS)
-    type: rss
-    url: https://siapress.ru/rss
-    geo_hint: югра
-    priority: 5
-    enabled: true
-
-  - name: Администрация Сургута (RSS)
-    type: rss
-    url: https://admsurgut.ru/bitrix/rss.php?ID=45&LANG=s1&TYPE=news&LIMIT=20
-    geo_hint: сургут
-    priority: 5
-    enabled: true
-
-  - name: Правительство ХМАО — Югры
-    type: html
-    url: https://admhmao.ru/news/
-    geo_hint: югра
-    item_selector: "a[href^='/news/']"
-    priority: 4
-    enabled: false   # сайт отвечает ошибкой 447; Югру читаем через Telegram ниже
-
-  - name: Правительство Югры (Telegram)
-    type: telegram
-    url: https://t.me/s/ugra_official
-    geo_hint: югра
-    priority: 4
-    enabled: true
-
-  - name: Мэрия Сургута (Telegram)
-    type: telegram
-    url: https://t.me/s/admsurgut
-    geo_hint: сургут
-    priority: 5
-    enabled: true
-
-  # Добавляйте свои источники по образцу выше.
-  # Для сайтов подберите CSS-селектор списка новостей через "Просмотр кода".
-"""
 
 # ----------------------------------------------------------------------------- #
 #  Конфиг
@@ -300,10 +111,10 @@ sources:
 
 def load_config():
     if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(DEFAULT_CONFIG.strip() + "\n", encoding="utf-8")
-        print(f"[init] Создан файл настроек: {CONFIG_PATH}")
+        sys.exit(f"[error] Не найден файл настроек: {CONFIG_PATH}\n"
+                 "Положите config.yaml в одну папку с news_radar.py.")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
 # ----------------------------------------------------------------------------- #
@@ -337,6 +148,36 @@ def make_hash(url, title):
 
 
 # ----------------------------------------------------------------------------- #
+#  Достоверность источников
+# ----------------------------------------------------------------------------- #
+
+def src_trust(src):
+    """Доверие к источнику 1..5 (по умолчанию 3). 5 — власть и проверенные СМИ, 1-2 — слухи и «народные» каналы."""
+    try:
+        return min(5, max(1, int(src.get("trust", 3))))
+    except (TypeError, ValueError):
+        return 3
+
+
+def trust_dot(trust):
+    trust = trust or 3
+    return "🟢" if trust >= 4 else ("🟡" if trust == 3 else "🔴")
+
+
+def verification_text(trust, confirmations):
+    """Короткая пометка для редактора: можно ли доверять новости без перепроверки."""
+    trust = trust or 3
+    confirmations = confirmations or 1
+    if trust >= 4:
+        return "🟢 Надёжный источник"
+    if confirmations >= 2:
+        return "🟡 Подтверждено несколькими источниками"
+    if trust == 3:
+        return "🟡 Источник среднего доверия: желательно проверить"
+    return "🔴 Не подтверждено (народный канал): перепроверьте до публикации"
+
+
+# ----------------------------------------------------------------------------- #
 #  База истории находок
 # ----------------------------------------------------------------------------- #
 
@@ -357,7 +198,8 @@ def db_connect():
             confirmations INTEGER DEFAULT 1,
             also_in TEXT DEFAULT '',
             why TEXT DEFAULT '',
-            notified INTEGER DEFAULT 1
+            notified INTEGER DEFAULT 1,
+            trust INTEGER DEFAULT 3
         )
     """)
     # Миграция: если база создана старой версией, добавляем недостающие колонки
@@ -367,9 +209,17 @@ def db_connect():
         ("also_in", "TEXT DEFAULT ''"),
         ("why", "TEXT DEFAULT ''"),
         ("notified", "INTEGER DEFAULT 1"),
+        ("trust", "INTEGER DEFAULT 3"),
     ]:
         if name not in cols:
             conn.execute(f"ALTER TABLE items ADD COLUMN {name} {ddl}")
+    # Какие источники радар уже «знает»: у нового источника первый заход проходит тихо,
+    # чтобы редактору не прилетели старые посты нового канала.
+    conn.execute("CREATE TABLE IF NOT EXISTS seen_sources (name TEXT PRIMARY KEY)")
+    conn.execute(
+        "INSERT OR IGNORE INTO seen_sources (name) SELECT DISTINCT source FROM items WHERE source != ?",
+        (DEMO_SOURCE,),
+    )
     conn.execute("DELETE FROM items WHERE source = ?", (DEMO_SOURCE,))  # демо не должно жить в истории
     conn.commit()
     return conn
@@ -398,42 +248,50 @@ def hash_exists(conn, url_hash):
 
 
 def find_similar_in_db(conn, title, history_days, threshold):
-    """Ищем в истории новость с очень похожим заголовком (та же новость из другого источника)."""
+    """Ищем в истории новость с очень похожим заголовком (та же новость из другого источника).
+    Возвращает словарь со строкой из базы или None."""
     since = (datetime.now() - timedelta(days=history_days)).isoformat(timespec="seconds")
-    for row_id, old, src, also in conn.execute(
-        "SELECT id, title, source, also_in FROM items WHERE found_at >= ?", (since,)
+    for row in conn.execute(
+        "SELECT id, title, url, source, also_in, trust, notified, score FROM items WHERE found_at >= ?",
+        (since,),
     ):
-        if old and similarity(title, old) >= threshold:
-            return row_id, src, also or ""
+        if row[1] and similarity(title, row[1]) >= threshold:
+            return {
+                "id": row[0], "title": row[1], "url": row[2], "source": row[3],
+                "also_in": row[4] or "", "trust": row[5] or 3, "notified": row[6], "score": row[7] or 0,
+            }
     return None
 
 
-def add_confirmation(conn, row_id, main_source, also_in, new_source):
-    """Эту новость уже видели; если источник новый, +1 к «подтверждено источниками»."""
-    known = {main_source, *[x for x in also_in.split(", ") if x]}
+def add_confirmation(conn, old, new_source, new_trust, min_score):
+    """Эту новость уже видели; если источник новый, +1 к «подтверждено источниками».
+    Возвращает True, если новость до этого шла только от ненадёжных источников и уже была
+    показана редактору, а теперь её подтвердил надёжный (тогда радар шлёт «подтверждено»)."""
+    known = {old["source"], *[x for x in old["also_in"].split(", ") if x]}
     if new_source in known:
-        return
-    known.discard(main_source)
+        return False
+    known.discard(old["source"])
     known.add(new_source)
     conn.execute(
-        "UPDATE items SET confirmations = confirmations + 1, also_in = ? WHERE id = ?",
-        (", ".join(sorted(known)), row_id),
+        "UPDATE items SET confirmations = confirmations + 1, also_in = ?, trust = ? WHERE id = ?",
+        (", ".join(sorted(known)), max(old["trust"], new_trust), old["id"]),
     )
     conn.commit()
+    return old["trust"] < 4 <= new_trust and old["notified"] == 1 and old["score"] >= min_score
 
 
 def save_item(conn, item):
     conn.execute(
         """INSERT OR IGNORE INTO items
            (url_hash, url, source, title, summary, category, score, published, found_at,
-            confirmations, also_in, why, notified)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            confirmations, also_in, why, notified, trust)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             item["url_hash"], item["url"], item["source"], item["title"],
             item["summary"], item["category"], item["score"],
             item["published"], datetime.now().isoformat(timespec="seconds"),
             item.get("confirmations", 1), ", ".join(item.get("also_in", [])),
-            item.get("why", ""), item.get("notified", 1),
+            item.get("why", ""), item.get("notified", 1), item.get("trust", 3),
         ),
     )
     conn.commit()
@@ -479,6 +337,9 @@ def fetch_rss(source, session):
 
 
 def fetch_html(source, session):
+    """Сайт без RSS: берём ссылки по CSS-селектору item_selector.
+    Необязательные поля источника: exclude_href — список кусков адреса, которые надо пропускать
+    (например, /tag/), min_title_len — минимальная длина заголовка (по умолчанию 15)."""
     if not BeautifulSoup:
         print("[warn] не установлен beautifulsoup4 — HTML-источники пропущены")
         return []
@@ -487,19 +348,39 @@ def fetch_html(source, session):
     soup = BeautifulSoup(resp.text, HTML_PARSER)
     items, seen = [], set()
     selector = source.get("item_selector") or "a"
-    for a in soup.select(selector)[:40]:
+    excluded = source.get("exclude_href") or []
+    min_len = int(source.get("min_title_len", 15))
+    list_page = source["url"].rstrip("/")
+    for a in soup.select(selector)[:60]:
         title = _clean(a.get_text())
         href = a.get("href", "")
-        if not title or len(title) < 15 or not href:
+        if not title or len(title) < min_len or not href:
             continue
         link = urljoin(source["url"], href)
+        if link.rstrip("/") == list_page or any(x in link for x in excluded):
+            continue  # ссылка на сам раздел или служебная страница (теги и т.п.)
         if link in seen:  # одна и та же ссылка часто встречается на странице дважды
             continue
         seen.add(link)
         # Небольшая выжимка: соседний текст с датой/анонсом, если есть
         parent_text = _clean(a.find_parent().get_text(" ", strip=True)) if a.parent else title
         items.append({"title": shorten(title, 200), "url": link, "summary": parent_text[:400], "published": ""})
+        if len(items) >= 40:
+            break
     return items
+
+
+def normalize_tg_url(raw):
+    """Принимает что угодно: @name, name, t.me/name, https://t.me/name, https://t.me/s/name
+    и возвращает адрес веб-просмотра канала https://t.me/s/name."""
+    u = str(raw or "").strip()
+    if not u or "ВПИШИТЕ" in u.upper():
+        raise ValueError("не указан ник Telegram-канала (поле url в config.yaml)")
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/(?:s/)?([A-Za-z0-9_]{3,})", u) \
+        or re.match(r"^@?([A-Za-z0-9_]{3,})$", u)
+    if not m:
+        raise ValueError(f"не удалось понять адрес канала: {u[:60]} (для закрытых каналов с + веб-просмотра нет)")
+    return f"https://t.me/s/{m.group(1)}"
 
 
 def fetch_telegram(source, session):
@@ -507,11 +388,15 @@ def fetch_telegram(source, session):
     if not BeautifulSoup:
         print("[warn] не установлен beautifulsoup4 — Telegram-источники пропущены")
         return []
-    resp = session.get(source["url"], timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    url = normalize_tg_url(source["url"])
+    resp = session.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
+    messages = soup.select(".tgme_widget_message")
+    if not messages:
+        raise RuntimeError("постов нет: ник неверный, канал закрыт или у него отключён веб-просмотр")
     items = []
-    for msg in soup.select(".tgme_widget_message")[:25]:
+    for msg in messages[-25:][::-1]:  # на странице посты идут от старых к новым: берём свежие
         text_node = msg.select_one(".tgme_widget_message_text")
         if not text_node:
             continue
@@ -522,7 +407,7 @@ def fetch_telegram(source, session):
         title = shorten(first_line if len(first_line) >= 20 else text, 160)
         time_tag = msg.select_one("time[datetime]")
         link_node = msg.select_one("a.tgme_widget_message_date")
-        link = urljoin("https://t.me/", link_node["href"]) if link_node and link_node.get("href") else source["url"]
+        link = urljoin("https://t.me/", link_node["href"]) if link_node and link_node.get("href") else url
         published = time_tag["datetime"] if time_tag else ""
         if title:
             items.append({"title": title, "url": link, "summary": text[:600], "published": published})
@@ -534,22 +419,47 @@ FETCHERS = {"rss": fetch_rss, "html": fetch_html, "telegram": fetch_telegram}
 
 def _fetch_one(src):
     """Забираем один источник. Возвращает (источник, записи, текст ошибки или None)."""
-    fetch = FETCHERS.get(src["type"])
+    fetch = FETCHERS.get(src.get("type"))
     if not fetch:
-        return src, [], f"неизвестный тип источника: {src['type']}"
+        return src, [], f"неизвестный тип источника: {src.get('type')}"
     try:
         return src, fetch(src, make_session()), None
     except Exception as e:
         return src, [], str(e)[:200] or type(e).__name__
 
 
-def fetch_all(sources):
+def fetch_many(sources):
     """Все источники опрашиваются одновременно: один медленный сайт не тормозит остальные."""
-    active = [s for s in sources if s.get("enabled", True)]
-    if not active:
+    if not sources:
         return []
-    with ThreadPoolExecutor(max_workers=min(8, len(active))) as pool:
-        return list(pool.map(_fetch_one, active))
+    with ThreadPoolExecutor(max_workers=min(8, len(sources))) as pool:
+        return list(pool.map(_fetch_one, sources))
+
+
+def fetch_all(sources):
+    return fetch_many([s for s in sources if s.get("enabled", True)])
+
+
+def check_sources(cfg):
+    """Режим 6: проверка, какие источники живы. Ничего не сохраняет и не отправляет."""
+    sources = cfg.get("sources", [])
+    print(f"\n=== Проверка источников: всего {len(sources)} ===")
+    ok = bad = 0
+    for src, raw, err in fetch_many([s for s in sources if s.get("enabled", True)]):
+        trust = src_trust(src)
+        head = (f"{trust_dot(trust)} {src['name']} [{KIND_RU.get(src.get('kind'), '—')}, "
+                f"доверие {trust}/5, приоритет {src.get('priority', 3)}/5]")
+        if err:
+            bad += 1
+            print(f"⚠️  {head}\n     ошибка: {err}")
+        else:
+            ok += 1
+            sample = shorten(raw[0]["title"], 90) if raw else "—"
+            print(f"✅ {head}\n     записей: {len(raw)}; пример: {sample}")
+    for src in sources:
+        if not src.get("enabled", True):
+            print(f"⏸  {src['name']}: выключен в config.yaml")
+    print(f"\nИтог: работает {ok}, с ошибкой {bad}.")
 
 
 # ----------------------------------------------------------------------------- #
@@ -630,6 +540,10 @@ def score_item(item, cfg):
     cat, topic_score = match_topics(text, cfg.get("categories", {}))
     priority_boost = 3 * int(item.get("source_priority", 3))
 
+    # Достоверность: власть и проверенные СМИ чуть выше, «народные» каналы чуть ниже
+    trust = int(item.get("source_trust", 3))
+    trust_adj = (trust - 3) * float(cfg.get("trust_weight", 3))
+
     fresh_bonus = 0
     dt = parse_dt(item.get("published", ""))
     if dt:
@@ -638,13 +552,15 @@ def score_item(item, cfg):
 
     penalty, noise_why = noise_penalty(text, cfg)
 
-    score = geo + topic_score + priority_boost + fresh_bonus + penalty
+    score = geo + topic_score + priority_boost + trust_adj + fresh_bonus + penalty
     why = []
     if geo:
         why.append(f"{geo_label} +{geo:.0f}")
     if topic_score:
         why.append(f"{cat} +{topic_score:.0f}")
     why.append(f"источник +{priority_boost}")
+    if trust_adj:
+        why.append(f"доверие {trust}/5 {trust_adj:+.0f}")
     if fresh_bonus:
         why.append(f"свежо +{fresh_bonus}")
     if penalty:
@@ -690,6 +606,7 @@ def format_alert(item):
     conf_line = ""
     if conf > 1:
         conf_line = f"✅ Подтверждено источниками: {conf} ({html_mod.escape(', '.join(item.get('also_in', [])))})\n"
+    trust_line = html_mod.escape(verification_text(item.get("trust", 3), conf)) + "\n"
     why = item.get("why", "")
     why_line = f"<i>Почему: {html_mod.escape(why)}</i>\n" if why else ""
     return (
@@ -697,6 +614,7 @@ def format_alert(item):
         f"<b>{html_mod.escape(title[:180])}</b>\n"
         f"{summary_line}\n"
         f"Источник: {html_mod.escape(item['source'])}\n"
+        f"{trust_line}"
         f"{conf_line}"
         f"{why_line}"
         f"🔗 {html_mod.escape(item['url'])}\n"
@@ -705,7 +623,7 @@ def format_alert(item):
 
 
 def telegram_creds(cfg):
-    # Секреты лучше хранить в .env, а не в config.yaml (см. .env.example)
+    # Секреты лучше хранить в .env, а не в config.yaml (см. env.example)
     tg = cfg.get("telegram") or {}
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or tg.get("bot_token", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID") or tg.get("chat_id", "")
@@ -787,18 +705,33 @@ def notify(cfg, items):
     return delivered
 
 
+def send_confirmations(cfg, upgrades):
+    """Дополнение к уже показанной новости: её подтвердил надёжный источник."""
+    for old, by in upgrades[:5]:
+        msg = (
+            "✅ <b>Подтверждено надёжным источником</b>\n"
+            f"<b>{html_mod.escape(old['title'][:180])}</b>\n\n"
+            f"Первоисточник находки: {html_mod.escape(old['source'])}\n"
+            f"Подтвердил: {html_mod.escape(by)}\n"
+            f"🔗 {html_mod.escape(old['url'])}"
+        )
+        print("\n" + re.sub(r"<[^>]+>", "", html_mod.unescape(msg)))
+        send_telegram(cfg, msg, preview=False)
+        time.sleep(0.4)
+
+
 def load_pending(conn, cfg):
     """Находки, которые пора показать редактору, но ещё не доставлены (новые + неотправленные раньше)."""
     since = (datetime.now() - timedelta(hours=cfg.get("pending_hours", 12))).isoformat(timespec="seconds")
     rows = conn.execute(
         """SELECT url_hash, url, source, title, summary, category, score, published,
-                  confirmations, also_in, why
+                  confirmations, also_in, why, trust
            FROM items WHERE notified = 0 AND score >= ? AND found_at >= ?
            ORDER BY score DESC LIMIT ?""",
         (cfg.get("notify_min_score", 35), since, cfg.get("max_alerts_per_cycle", 10)),
     ).fetchall()
     keys = ["url_hash", "url", "source", "title", "summary", "category", "score", "published",
-            "confirmations", "also_in", "why"]
+            "confirmations", "also_in", "why", "trust"]
     items = []
     for row in rows:
         d = dict(zip(keys, row))
@@ -840,6 +773,7 @@ label{font-size:12px;color:#555;display:flex;flex-direction:column;gap:3px}
 input,select,button{padding:6px 8px;font-size:14px}
 a{color:#0b5cad;text-decoration:none}a:hover{text-decoration:underline}
 .ok{color:#1a8f3a}.bad{color:#c0392b}
+.legend{font-size:12px;color:#555;margin-top:6px}
 """
 
 
@@ -860,7 +794,7 @@ class DashHandler(BaseHTTPRequestHandler):
 
         conn = db_connect()
         rows = conn.execute(
-            """SELECT found_at, score, category, source, title, url, confirmations, why, summary
+            """SELECT found_at, score, category, source, title, url, confirmations, why, summary, trust
                FROM items WHERE score >= ? ORDER BY found_at DESC, score DESC LIMIT 600""",
             (min_score,),
         ).fetchall()
@@ -881,17 +815,20 @@ class DashHandler(BaseHTTPRequestHandler):
             return f"<span class='b {cls}'>{score:.0f}</span>"
 
         rows_html = "".join(
-            f"<tr><td>{esc(_found_time(f))}</td><td>{badge(s)}</td><td>{esc(c or '')}</td><td>{esc(src)}</td>"
+            f"<tr><td>{esc(_found_time(f))}</td><td>{badge(s)}</td><td>{esc(c or '')}</td>"
+            f"<td>{trust_dot(tr)} {esc(src)}</td>"
             f"<td>{n}</td><td><a href='{esc(u, quote=True)}' target='_blank'>{esc(t[:140])}</a>"
             f"<div class='why'>{esc(w or '')}</div></td></tr>"
-            for f, s, c, src, t, u, n, w, _summary in rows
+            for f, s, c, src, t, u, n, w, _summary, tr in rows
         )
         status_html = "".join(
             f"<tr><td>{'<span class=ok>✅</span>' if not st['error'] else '<span class=bad>⚠️</span>'}</td>"
-            f"<td>{esc(name)}</td><td>{st['count']}</td><td>{esc(st['time'])}</td>"
+            f"<td>{esc(name)}</td>"
+            f"<td>{trust_dot(st.get('trust'))} {st.get('trust', 3)}/5 · {esc(KIND_RU.get(st.get('kind'), '—'))}</td>"
+            f"<td>{st['count']}</td><td>{esc(st['time'])}</td>"
             f"<td class='bad'>{esc(st['error'] or '')}</td></tr>"
             for name, st in SOURCE_STATUS.items()
-        ) or "<tr><td colspan=5>Ещё не было ни одной проверки</td></tr>"
+        ) or "<tr><td colspan=6>Ещё не было ни одной проверки</td></tr>"
         cat_opts = "<option value=''>все темы</option>" + "".join(
             f"<option value='{esc(c, quote=True)}'{' selected' if c == cat else ''}>{esc(c)}</option>" for c in categories
         )
@@ -903,7 +840,8 @@ class DashHandler(BaseHTTPRequestHandler):
 <p>Последняя проверка: {esc(last)} · всего находок в базе: {total} · страница обновляется сама раз в минуту</p></header>
 <main>
 <div class='card'><b>Источники</b>
-<table><tr><th></th><th>Название</th><th>Записей</th><th>Проверен</th><th>Ошибка</th></tr>{status_html}</table></div>
+<table><tr><th></th><th>Название</th><th>Доверие · тип</th><th>Записей</th><th>Проверен</th><th>Ошибка</th></tr>{status_html}</table>
+<div class='legend'>🟢 надёжный источник · 🟡 средний уровень доверия · 🔴 «народный» канал: перепроверяйте</div></div>
 <div class='card'><form method='get'>
 <label>Минимальный балл<input type='number' name='min' value='{min_score}' min='0' max='100'></label>
 <label>Тема<select name='cat'>{cat_opts}</select></label>
@@ -937,11 +875,7 @@ def start_dashboard():
 
 
 # ----------------------------------------------------------------------------- #
-#  Цикл: сбор -> отбор -> уведомление
-# ----------------------------------------------------------------------------- #
-
-# ----------------------------------------------------------------------------- #
-#  Команды бота в Telegram: /top /history /sources /status /help
+#  Команды бота в Telegram: /top /history /latest /sources /status /demo /help
 # ----------------------------------------------------------------------------- #
 
 def _found_time(ts):
@@ -959,12 +893,12 @@ def _icon(score):
 def _list_items(rows):
     esc = html_mod.escape
     blocks = []
-    for found_at, score, category, source, title, url, conf in rows:
+    for found_at, score, category, source, title, url, conf, trust in rows:
         mark = f" · ✅×{conf}" if conf and conf > 1 else ""
         blocks.append(
             f"{_icon(score)} <b>{score:.0f}</b> · {esc(category or '—')}{mark}\n"
             f"<a href=\"{esc(url, quote=True)}\">{esc(shorten(title, 110))}</a>\n"
-            f"<i>{esc(source)} · {_found_time(found_at)}</i>"
+            f"<i>{trust_dot(trust)} {esc(source)} · {_found_time(found_at)}</i>"
         )
     return "\n\n".join(blocks)
 
@@ -973,7 +907,7 @@ BOT_COMMANDS = [
     ("top", "Топ новостей за сутки по баллам (/top 10)"),
     ("history", "Вся история по убыванию баллов (/history 15)"),
     ("latest", "Самые свежие находки по времени"),
-    ("sources", "Источники, приоритеты и их состояние"),
+    ("sources", "Источники, приоритеты, доверие и состояние"),
     ("demo", "Тестовое уведомление (проверка связи)"),
     ("status", "Состояние радара и настройки"),
     ("help", "Список команд"),
@@ -983,7 +917,32 @@ BOT_HELP = (
     "📡 <b>Новостной радар Сургута и Югры</b>\n"
     "Сам присылаю важные новости. А ещё умею:\n\n"
     + "\n".join(f"/{c} — {d}" for c, d in BOT_COMMANDS)
+    + "\n\n🟢 надёжный источник · 🟡 средний · 🔴 «народный» канал, перепроверьте"
 )
+
+
+def welcome_text(cfg):
+    """Приветствие по команде /start: коротко о боте, кнопки и кружки. Читается за полминуты."""
+    every = cfg.get("interval_minutes", 15)
+    return (
+        "📡 <b>Новостной радар Сургута и Югры</b>\n"
+        "Слежу за властью и СМИ вместо вас и сразу присылаю то, что похоже на новость.\n\n"
+        "<b>Как работаю</b>\n"
+        f"Каждые {every} мин проверяю источники, убираю шум и дубли, "
+        "ставлю оценку важности от 0 до 100 (🔥 горячее, ❗ важное) и присылаю главное.\n\n"
+        "<b>Кнопки внизу</b>\n"
+        "🏆 <b>Топ</b>: лучшие находки за сутки\n"
+        "🕘 <b>История</b>: все находки по убыванию баллов\n"
+        "🛰 <b>Источники</b>: откуда беру новости и живы ли они\n"
+        "📊 <b>Статус</b>: когда была проверка и сколько найдено\n"
+        "🧪 <b>Проверка</b>: тестовое уведомление, чтобы убедиться, что всё работает\n\n"
+        "<b>Кружки: можно ли верить</b>\n"
+        "🟢 власть и проверенные СМИ: берите в работу\n"
+        "🟡 средний уровень: лучше проверить\n"
+        "🔴 «народный» канал: сначала перепроверьте. "
+        "Если новость подтвердит надёжный источник, я напишу «✅ Подтверждено».\n\n"
+        "Остальные команды: /help"
+    )
 
 
 def bot_action(cfg, cmd, asker):
@@ -1000,13 +959,15 @@ def bot_reply(cfg, command):
     parts = command.split()
     cmd = parts[0].split("@")[0].lower()
     arg = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None  # например /top 10
-    if cmd in ("/start", "/help"):
+    if cmd == "/start":
+        return welcome_text(cfg)
+    if cmd == "/help":
         return BOT_HELP
     if cmd == "/demo":
         return format_alert(make_demo_item(cfg))
     conn = db_connect()
     try:
-        cols = "found_at, score, category, source, title, url, confirmations"
+        cols = "found_at, score, category, source, title, url, confirmations, trust"
         if cmd == "/top":
             n = min(arg or 5, 10)
             since = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
@@ -1046,9 +1007,10 @@ def bot_reply(cfg, command):
                     icon, info = "⚠️", "ошибка"
                 else:
                     icon, info = "✅", f"записей: {st['count']}, проверен {st['time']}"
+                trust = src_trust(src)
                 lines.append(
                     f"{icon} <b>{esc(src['name'])}</b>\n"
-                    f"    приоритет {src.get('priority', 3)}/5 · {esc(info)}"
+                    f"    {trust_dot(trust)} доверие {trust}/5 · приоритет {src.get('priority', 3)}/5 · {esc(info)}"
                 )
             return "🛰 <b>Источники</b>\n\n" + "\n".join(lines)
         if cmd == "/status":
@@ -1126,6 +1088,10 @@ def bot_commands_loop(cfg):
             time.sleep(10)
 
 
+# ----------------------------------------------------------------------------- #
+#  Цикл: сбор -> отбор -> уведомление
+# ----------------------------------------------------------------------------- #
+
 CYCLE_LOCK = Lock()
 
 
@@ -1140,17 +1106,23 @@ def _run_cycle(cfg):
     days = cfg.get("history_days", 7)
     threshold = cfg.get("dup_threshold", 75)
     min_score = cfg.get("notify_min_score", 35)
-    first_run = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
-    new_items, errors = [], 0
+    baseline_on = cfg.get("baseline_on_first_run", True)
+    seen_sources = {r[0] for r in conn.execute("SELECT name FROM seen_sources")}
+    new_sources = set()  # источники, которых радар раньше не видел
+    new_items, upgrades, errors = [], [], 0
 
     for src, raw, err in fetch_all(cfg.get("sources", [])):
         stamp = datetime.now(LOCAL_TZ).strftime("%H:%M:%S")
-        SOURCE_STATUS[src["name"]] = {"time": stamp, "count": len(raw), "error": err}
+        trust = src_trust(src)
+        SOURCE_STATUS[src["name"]] = {"time": stamp, "count": len(raw), "error": err,
+                                      "trust": trust, "kind": src.get("kind", "")}
         if err:
             errors += 1
             print(f"[warn] {src['name']}: {err}")
             continue
         print(f"[src] {src['name']}: получено записей {len(raw)}")
+        if src["name"] not in seen_sources:
+            new_sources.add(src["name"])
         for raw_item in raw:
             url_hash = make_hash(raw_item["url"], raw_item["title"])
             if hash_exists(conn, url_hash):
@@ -1161,14 +1133,17 @@ def _run_cycle(cfg):
                 if src["name"] != twin["source"] and src["name"] not in twin["also_in"]:
                     twin["also_in"].append(src["name"])
                     twin["confirmations"] += 1
+                    twin["trust"] = max(twin["trust"], trust)
                 continue
             # ...или в истории за последние дни?
             old = find_similar_in_db(conn, raw_item["title"], days, threshold)
             if old:
-                add_confirmation(conn, old[0], old[1], old[2], src["name"])
+                if add_confirmation(conn, old, src["name"], trust, min_score):
+                    upgrades.append((old, src["name"]))
                 continue
             score, cat, why = score_item(
-                {**raw_item, "source_priority": src.get("priority", 3), "geo_hint": src.get("geo_hint", "")}, cfg
+                {**raw_item, "source_priority": src.get("priority", 3),
+                 "geo_hint": src.get("geo_hint", ""), "source_trust": trust}, cfg
             )
             new_items.append({
                 "url_hash": url_hash,
@@ -1182,6 +1157,7 @@ def _run_cycle(cfg):
                 "published": raw_item["published"],
                 "confirmations": 1,
                 "also_in": [],
+                "trust": trust,
             })
 
     # Чем больше независимых источников написали об этом, тем важнее и достовернее
@@ -1191,25 +1167,31 @@ def _run_cycle(cfg):
             it["score"] = min(100, it["score"] + bonus)
             it["why"] += f"; подтверждено {it['confirmations']} источниками +{bonus}"
 
-    # Первый запуск: всё, что лежит на сайтах сейчас, не «свежее», а просто накопленное.
-    # Запоминаем это тихо, чтобы редактору не прилетело 10 старых новостей.
-    baseline = first_run and cfg.get("baseline_on_first_run", True) and bool(new_items)
-    if baseline:
-        print("[init] Первый запуск: запоминаем текущие новости без уведомлений.")
+    # Новый источник (или первый запуск): всё, что лежит там сейчас, не «свежее», а просто
+    # накопленное. Запоминаем это тихо, чтобы редактору не прилетело 10 старых новостей.
+    silent_sources = new_sources if baseline_on else set()
+    if silent_sources and new_items:
+        print(f"[init] Новые источники ({len(silent_sources)}): запоминаем текущие записи без уведомлений.")
     for it in new_items:
-        # notified=0 значит «надо показать редактору» (если не baseline и балл достаточный)
-        it["notified"] = 0 if (it["score"] >= min_score and not baseline) else 1
+        silent = all(s in silent_sources for s in [it["source"], *it["also_in"]])
+        important = it["score"] >= min_score
+        # notified: 0 = надо показать редактору, 1 = показано/не требуется, 2 = важное, но тихо (baseline)
+        it["notified"] = 0 if (important and not silent) else (2 if important else 1)
 
     purge_old(conn, days)
     for it in new_items:
         save_item(conn, it)
+    conn.executemany("INSERT OR IGNORE INTO seen_sources (name) VALUES (?)", [(n,) for n in new_sources])
+    conn.commit()
 
     sent = deliver_pending(conn, cfg)
     conn.close()
+    if upgrades:
+        send_confirmations(cfg, upgrades)
 
     LAST_CYCLE["time"] = datetime.now(LOCAL_TZ).strftime("%d.%m %H:%M:%S")
     print(f"\n[cycle] {datetime.now():%H:%M} | новых записей: {len(new_items)} | "
-          f"уведомлений: {sent} | ошибок источников: {errors}")
+          f"уведомлений: {sent} | подтверждений: {len(upgrades)} | ошибок источников: {errors}")
     return len(new_items), sent, errors
 
 
@@ -1237,11 +1219,13 @@ def make_demo_item(cfg):
         "summary": summary,
         "published": datetime.now(timezone.utc).isoformat(),
     }
-    score, cat, why = score_item({**raw, "source_priority": 5, "geo_hint": "сургут"}, cfg)
+    score, cat, why = score_item(
+        {**raw, "source_priority": 5, "geo_hint": "сургут", "source_trust": 4}, cfg
+    )
     return {
         "url_hash": "demo", "url": raw["url"], "source": DEMO_SOURCE, "title": raw["title"],
         "summary": raw["summary"], "category": cat, "score": score, "why": why,
-        "published": raw["published"], "confirmations": 1, "also_in": [],
+        "published": raw["published"], "confirmations": 1, "also_in": [], "trust": 4,
     }
 
 
@@ -1261,10 +1245,7 @@ def run_demo(cfg):
 def run_test_telegram(cfg):
     token, chat_id = telegram_creds(cfg)
     if not (token and chat_id):
-        if not token:
-            print("[test] Не заданы TELEGRAM_BOT_TOKEN (файл .env).")
-        elif not chat_id:
-            print("[test] Не заданы TELEGRAM_CHAT_ID (файл .env).")
+        print("[test] Не заданы TELEGRAM_BOT_TOKEN и/или TELEGRAM_CHAT_ID (файл .env).")
         return
     res = send_telegram(cfg, "✅ <b>Новостной радар подключён.</b>\nСюда будут приходить важные новости Сургута и Югры.")
     print("[test] Готово: проверьте Telegram." if res == "ok" else "[test] Не получилось, причина в строке [warn] выше.")
@@ -1280,6 +1261,7 @@ MODES = {
     "3": "ТЕСТ TELEGRAM: отправить «радар подключён» (проверка токена и chat_id из .env)",
     "4": "ОДНА ПРОВЕРКА СЕЙЧАС: сразу опросить источники и показать результат",
     "5": "СБРОС ИСТОРИИ: стереть базу находок (после этого радар начнёт с чистого листа)",
+    "6": "ПРОВЕРКА ИСТОЧНИКОВ: какие сайты и каналы реально отдают новости (без уведомлений)",
 }
 
 RADAR = {"running": False}
@@ -1311,6 +1293,7 @@ def start_radar(cfg):
 def clear_history():
     conn = db_connect()
     conn.execute("DELETE FROM items")
+    conn.execute("DELETE FROM seen_sources")  # после сброса источники снова «новые»: первый заход тихий
     conn.commit()
     conn.close()
     print("[reset] История стёрта.")
@@ -1327,6 +1310,8 @@ def do_action(cfg, mode):
         run_cycle(cfg)
     elif mode == "5":
         clear_history()
+    elif mode == "6":
+        check_sources(cfg)
 
 
 def show_menu():
@@ -1371,6 +1356,7 @@ def main():
     parser.add_argument("--dashboard", action="store_true", help="поднять веб-дашборд")
     parser.add_argument("--demo", action="store_true", help="подбросить тестовую горячую новость")
     parser.add_argument("--test-telegram", action="store_true", help="отправить тестовое сообщение в Telegram")
+    parser.add_argument("--check-sources", action="store_true", help="проверить, какие источники отдают новости")
     parser.add_argument("--reset-db", action="store_true", help="стереть историю находок")
     args = parser.parse_args()
 
@@ -1394,6 +1380,9 @@ def main():
             print("\n[stop] Остановлено.")
         return
 
+    if args.check_sources:
+        check_sources(cfg)
+        return
     if args.test_telegram:
         run_test_telegram(cfg)
         return
