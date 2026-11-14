@@ -104,6 +104,15 @@ KIND_RU = {
     "author": "личный канал",
 }
 
+# Сообщение незнакомому пользователю: бот закрыт, доступ даёт администратор
+DENIED_NOTICE = (
+    "🔒 <b>Это закрытый бот редакции.</b>\n"
+    "Новостной радар присылает находки только сотрудникам, "
+    "чьи чаты подключены администратором.\n\n"
+    "Хотите получать уведомления? Передайте администратору ваш ID:\n"
+    "<code>{chat_id}</code>"
+)
+
 
 # ----------------------------------------------------------------------------- #
 #  Конфиг
@@ -1036,6 +1045,7 @@ def bot_commands_loop(cfg):
     if not (token and allowed):
         return
     api = f"https://api.telegram.org/bot{token}"
+    greeted = set()  # кому уже отправили «закрытый бот», чтобы не спамить
     offset, warned = None, False
     try:
         # пропускаем старые сообщения, чтобы не отвечать на то, что написали до запуска
@@ -1075,8 +1085,15 @@ def bot_commands_loop(cfg):
                 text = (msg.get("text") or "").strip()
                 asker = str((msg.get("chat") or {}).get("id"))
                 text = BUTTONS.get(text, text)  # нажатая кнопка = команда
-                if asker not in allowed or not text.startswith("/"):
-                    continue  # чужие чаты и обычные сообщения игнорируем
+                if asker not in allowed:
+                    # Незнакомый пользователь: один раз объясняем, как получить доступ
+                    if text and asker not in greeted:
+                        greeted.add(asker)
+                        send_telegram(cfg, DENIED_NOTICE.format(chat_id=asker),
+                                      preview=False, to=asker)
+                    continue  # обычные сообщения и повторные запросы игнорируем
+                if not text.startswith("/"):
+                    continue
                 cmd = text.split()[0].split("@")[0].lower()
                 if bot_action(cfg, cmd, asker):
                     continue

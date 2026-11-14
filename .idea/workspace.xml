@@ -4,7 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="5880f047-c05a-482d-9b53-1f96b0668126" name="Changes" comment="8 commit qt" />
+    <list default="true" id="5880f047-c05a-482d-9b53-1f96b0668126" name="Changes" comment="9 commit env">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/config.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/news_radar.py" beforeDir="false" afterPath="$PROJECT_DIR$/news_radar.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/radar_history.db" beforeDir="false" afterPath="$PROJECT_DIR$/radar_history.db" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -168,7 +173,15 @@
       <option name="project" value="LOCAL" />
       <updated>1794674643031</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="9 commit env">
+      <option name="closed" value="true" />
+      <created>1794675075285</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1794675075285</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -190,6 +203,7 @@
     <MESSAGE value="5 commit" />
     <MESSAGE value="7 commit" />
     <MESSAGE value="8 commit qt" />
-    <option name="LAST_COMMIT_MESSAGE" value="8 commit qt" />
+    <MESSAGE value="9 commit env" />
+    <option name="LAST_COMMIT_MESSAGE" value="9 commit env" />
   </component>
 </project>
