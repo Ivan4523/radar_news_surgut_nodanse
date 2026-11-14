@@ -5,16 +5,23 @@
 
 Пайплайн: Сбор -> Отбор -> Уведомление (+ история находок в SQLite и веб-дашборд).
 
-Запуск:
-    pip install -r requirements.txt
-    python news_radar.py --once            # один проход (для теста)
-    python news_radar.py                   # цикл: проверка каждые N минут
-    python news_radar.py --dashboard       # + веб-дашборд на http://127.0.0.1:8900
-    python news_radar.py --test-telegram   # проверить, что бот подключён
-    python news_radar.py --demo            # подбросить тестовую «горячую» новость (для показа)
-    python news_radar.py --reset-db        # стереть историю и начать с чистого листа
+ЗАПУСК. Запустите файл (кнопка Run в PyCharm). Появится меню, введите цифру:
 
-Команды бота в Telegram (работают, пока радар запущен): /help /top /history /latest /sources /status /demo
+    1 — ЗАПУСТИТЬ РАДАР в фоне: проверка источников каждые N минут + бот в Telegram
+        + дашборд (http://127.0.0.1:8900). Достаточно нажать один раз: дальше радар
+        работает сам, а меню остаётся доступным.
+    2 — ДЕМО: прислать в Telegram тестовую «горячую» новость (в историю не попадает).
+    3 — ТЕСТ TELEGRAM: отправить «радар подключён» (проверка токена и chat_id из .env).
+    4 — ОДНА ПРОВЕРКА СЕЙЧАС: сразу опросить источники и показать результат.
+    5 — СБРОС ИСТОРИИ: стереть базу находок (спросит «да/нет»).
+    0 — ВЫХОД: единственный способ закрыть программу (радар при этом остановится).
+
+После каждого действия меню появляется снова: программа сама не закрывается.
+Цифру можно передать и сразу: python news_radar.py 2 (выполнит и покажет меню).
+Старые команды тоже работают: --once, --dashboard, --demo, --test-telegram, --reset-db
+Перед первым запуском: pip install -r requirements.txt
+
+Кнопки и команды бота в Telegram (работают, пока радар запущен): /top /history /latest /sources /status /demo /help
 
 Настройки — в config.yaml (создаётся автоматически при первом запуске).
 Секреты (токен бота) — в файле .env, см. .env.example.
@@ -37,7 +44,7 @@ from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
@@ -113,8 +120,8 @@ dup_threshold: 75
 # (чтобы редактору не прилетели старые). Для демо поставьте false.
 baseline_on_first_run: true
 
-# Telegram-бот: токен и chat_id ЛУЧШЕ хранить в файле .env (см. .env.example),
-# тогда сюда ничего вписывать не нужно. Без токена находки печатаются в консоль.
+# Telegram-бот: токен и chat_id храним в файле .env (см. env.example),
+# сюда ничего вписывать не нужно. Без токена находки печатаются в консоль.
 telegram:
   bot_token: ""
   chat_id: ""
@@ -222,9 +229,11 @@ categories:
       - {word: "эпидем", w: 8}
       - {word: "субсиди", w: 6}
 
-# Штрафы за «шум»: дайджесты, афиши, поздравления обычно не повод для срочного материала.
+# Штрафы за «шум»: дайджесты, афиши, поздравления, конкурсы и советы обычно
+# не повод для срочного материала.
 # Отрицательное число вычитается из балла (слово ищется с начала слова).
 noise_words:
+  # --- старые ---
   - {word: "за неделю", w: -20}
   - {word: "дайджест", w: -20}
   - {word: "итоги недели", w: -20}
@@ -233,6 +242,13 @@ noise_words:
   - {word: "поздравл", w: -15}
   - {word: "график работы", w: -10}
   - {word: "режим работы", w: -10}
+  # --- новые (убирают ложные срабатывания вроде «турнир среди пожарных») ---
+  - {word: "турнир", w: -25}
+  - {word: "конкурс", w: -20}
+  - {word: "фестивал", w: -20}
+  - {word: "как провести", w: -25}
+  - {word: "советы", w: -20}
+  - {word: "викторин", w: -20}
 
 # Источники. type: rss | html | telegram
 # priority 1..5: добавляет priority*3 к баллу.
@@ -251,6 +267,14 @@ sources:
     geo_hint: сургут
     priority: 5
     enabled: true
+
+  - name: Правительство ХМАО — Югры
+    type: html
+    url: https://admhmao.ru/news/
+    geo_hint: югра
+    item_selector: "a[href^='/news/']"
+    priority: 4
+    enabled: false   # сайт отвечает ошибкой 447; Югру читаем через Telegram ниже
 
   - name: Правительство Югры (Telegram)
     type: telegram
@@ -896,9 +920,20 @@ class DashHandler(BaseHTTPRequestHandler):
         pass
 
 
+class SingleServer(ThreadingHTTPServer):
+    allow_reuse_address = False  # на Windows иначе две копии радара смогут занять один порт
+
+
 def start_dashboard():
-    Thread(target=lambda: ThreadingHTTPServer(("127.0.0.1", DASH_PORT), DashHandler).serve_forever(), daemon=True).start()
+    try:
+        server = SingleServer(("127.0.0.1", DASH_PORT), DashHandler)
+    except OSError:
+        print(f"[error] Порт {DASH_PORT} занят: радар уже запущен (в другом окне, в PyCharm или в фоне). "
+              "Остановите его (красный квадрат в PyCharm или stop_radar.bat) и запустите снова.")
+        return False
+    Thread(target=server.serve_forever, daemon=True).start()
     print(f"[dashboard] Открыт на http://127.0.0.1:{DASH_PORT}")
+    return True
 
 
 # ----------------------------------------------------------------------------- #
@@ -949,6 +984,14 @@ BOT_HELP = (
     "Сам присылаю важные новости. А ещё умею:\n\n"
     + "\n".join(f"/{c} — {d}" for c, d in BOT_COMMANDS)
 )
+
+
+def bot_action(cfg, cmd, asker):
+    """Команды-действия (не просто показать данные). True — команда обработана."""
+    if cmd == "/demo":
+        send_demo(cfg, to=asker)  # проверка: тестовое уведомление тому, кто нажал
+        return True
+    return False
 
 
 def bot_reply(cfg, command):
@@ -1055,7 +1098,11 @@ def bot_commands_loop(cfg):
             r = requests.get(f"{api}/getUpdates", params=params, timeout=45)
             if r.status_code != 200:
                 if not warned:
-                    print(f"[warn] Команды бота: Telegram вернул {r.status_code}")
+                    if r.status_code == 409:
+                        print("[warn] Команды бота: этот токен уже слушает ДРУГОЙ запущенный радар (ошибка 409). "
+                              "Остановите лишние копии: красный квадрат в PyCharm или stop_radar.bat.")
+                    else:
+                        print(f"[warn] Команды бота: Telegram вернул {r.status_code}")
                     warned = True
                 time.sleep(10)
                 continue
@@ -1068,8 +1115,8 @@ def bot_commands_loop(cfg):
                 text = BUTTONS.get(text, text)  # нажатая кнопка = команда
                 if asker not in allowed or not text.startswith("/"):
                     continue  # чужие чаты и обычные сообщения игнорируем
-                if text.split()[0].split("@")[0].lower() == "/demo":
-                    send_demo(cfg, to=asker)  # проверка: тестовое уведомление тому, кто нажал
+                cmd = text.split()[0].split("@")[0].lower()
+                if bot_action(cfg, cmd, asker):
                     continue
                 send_telegram(cfg, bot_reply(cfg, text), preview=False, to=asker)
         except requests.RequestException:
@@ -1079,7 +1126,16 @@ def bot_commands_loop(cfg):
             time.sleep(10)
 
 
+CYCLE_LOCK = Lock()
+
+
 def run_cycle(cfg):
+    """Один проход. Блокировка не даёт двум проверкам идти одновременно (по расписанию и из бота)."""
+    with CYCLE_LOCK:
+        return _run_cycle(cfg)
+
+
+def _run_cycle(cfg):
     conn = db_connect()
     days = cfg.get("history_days", 7)
     threshold = cfg.get("dup_threshold", 75)
@@ -1205,14 +1261,112 @@ def run_demo(cfg):
 def run_test_telegram(cfg):
     token, chat_id = telegram_creds(cfg)
     if not (token and chat_id):
-        print("[test] Не заданы TELEGRAM_BOT_TOKEN и/или TELEGRAM_CHAT_ID (файл .env).")
+        if not token:
+            print("[test] Не заданы TELEGRAM_BOT_TOKEN (файл .env).")
+        elif not chat_id:
+            print("[test] Не заданы TELEGRAM_CHAT_ID (файл .env).")
         return
     res = send_telegram(cfg, "✅ <b>Новостной радар подключён.</b>\nСюда будут приходить важные новости Сургута и Югры.")
     print("[test] Готово: проверьте Telegram." if res == "ok" else "[test] Не получилось, причина в строке [warn] выше.")
 
 
+# ----------------------------------------------------------------------------- #
+#  Режимы запуска: вместо команд в терминале вводится цифра
+# ----------------------------------------------------------------------------- #
+
+MODES = {
+    "1": "ЗАПУСТИТЬ РАДАР в фоне: проверки каждые N минут + бот в Telegram + дашборд (достаточно один раз)",
+    "2": "ДЕМО: прислать в Telegram тестовую «горячую» новость (в историю не попадает)",
+    "3": "ТЕСТ TELEGRAM: отправить «радар подключён» (проверка токена и chat_id из .env)",
+    "4": "ОДНА ПРОВЕРКА СЕЙЧАС: сразу опросить источники и показать результат",
+    "5": "СБРОС ИСТОРИИ: стереть базу находок (после этого радар начнёт с чистого листа)",
+}
+
+RADAR = {"running": False}
+
+
+def radar_loop(cfg):
+    """Проверки по расписанию, пока программа открыта."""
+    while True:
+        try:
+            run_cycle(cfg)
+        except Exception as e:
+            print(f"[error] сбой цикла: {e}")
+        time.sleep(int(cfg.get("interval_minutes", 15)) * 60)
+
+
+def start_radar(cfg):
+    """Запускает радар в фоне (один раз): дашборд, команды бота и проверки по расписанию."""
+    if RADAR["running"]:
+        print("[radar] Радар уже работает.")
+        return True
+    if not start_dashboard():
+        return False
+    Thread(target=bot_commands_loop, args=(cfg,), daemon=True).start()
+    Thread(target=radar_loop, args=(cfg,), daemon=True).start()
+    RADAR["running"] = True
+    return True
+
+
+def clear_history():
+    conn = db_connect()
+    conn.execute("DELETE FROM items")
+    conn.commit()
+    conn.close()
+    print("[reset] История стёрта.")
+
+
+def do_action(cfg, mode):
+    if mode == "1":
+        start_radar(cfg)
+    elif mode == "2":
+        run_demo(cfg)
+    elif mode == "3":
+        run_test_telegram(cfg)
+    elif mode == "4":
+        run_cycle(cfg)
+    elif mode == "5":
+        clear_history()
+
+
+def show_menu():
+    state = "работает ✅" if RADAR["running"] else "не запущен (введите 1)"
+    print(f"\n=== Новостной радар Сургута и Югры · радар: {state} ===")
+    for num, text in MODES.items():
+        print(f"  {num} — {text}")
+    print("  0 — выход (радар остановится)")
+
+
+def interactive(cfg, first_mode=None):
+    """Меню, которое не закрывается: после каждого действия появляется снова. Выход только цифрой 0."""
+    if first_mode:
+        do_action(cfg, first_mode)
+    while sys.stdin is not None:
+        show_menu()
+        try:
+            choice = input("Введите цифру и нажмите Enter: ").strip()
+        except EOFError:
+            break
+        if choice == "0":
+            print("[stop] Остановлено.")
+            return
+        if choice not in MODES:
+            print("Нет такой цифры, попробуйте ещё раз.")
+            continue
+        if choice == "5" and input("Точно стереть всю историю? (да/нет): ").strip().lower() not in ("да", "y", "yes"):
+            print("Отменено.")
+            continue
+        do_action(cfg, choice)
+    # Ввода с клавиатуры нет (фоновый запуск без окна): просто работаем, меню не нужно
+    if not start_radar(cfg):
+        sys.exit(1)
+    while True:
+        time.sleep(3600)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Новостной радар Сургута и Югры")
+    parser.add_argument("mode", nargs="?", choices=list(MODES), help="цифра режима (см. меню в начале файла)")
     parser.add_argument("--once", action="store_true", help="один проход и выход")
     parser.add_argument("--dashboard", action="store_true", help="поднять веб-дашборд")
     parser.add_argument("--demo", action="store_true", help="подбросить тестовую горячую новость")
@@ -1230,14 +1384,24 @@ def main():
         return
 
     cfg = load_config()
+
+    # Запуск без флагов (или с цифрой): меню, которое не закрывается.
+    # Старые флаги (--dashboard, --once, --demo ...) работают как раньше; ими пользуется start_radar.bat.
+    if args.mode or len(sys.argv) == 1:
+        try:
+            interactive(cfg, args.mode)
+        except KeyboardInterrupt:
+            print("\n[stop] Остановлено.")
+        return
+
     if args.test_telegram:
         run_test_telegram(cfg)
         return
     if args.demo:
         run_demo(cfg)
         return
-    if args.dashboard:
-        start_dashboard()
+    if args.dashboard and not start_dashboard():
+        sys.exit(1)
     if not args.once or args.dashboard:  # команды бота работают, пока радар не закрыт
         Thread(target=bot_commands_loop, args=(cfg,), daemon=True).start()
 
@@ -1249,12 +1413,7 @@ def main():
                 while True:
                     time.sleep(1)
             return
-        while True:
-            try:
-                run_cycle(cfg)
-            except Exception as e:
-                print(f"[error] сбой цикла: {e}")
-            time.sleep(int(cfg.get("interval_minutes", 15)) * 60)
+        radar_loop(cfg)
     except KeyboardInterrupt:
         print("\n[stop] Остановлено.")
         sys.exit(0)

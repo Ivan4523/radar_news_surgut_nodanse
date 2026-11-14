@@ -177,6 +177,14 @@ sources:
     priority: 5
     enabled: true
 
+  - name: Правительство ХМАО — Югры
+    type: html
+    url: https://admhmao.ru/news/
+    geo_hint: югра
+    item_selector: "a[href^='/news/']"
+    priority: 4
+    enabled: false   # Югру читаем через Telegram ниже
+
   - name: Правительство Югры (Telegram)
     type: telegram
     url: https://t.me/s/ugra_official
