@@ -14,8 +14,10 @@
     python news_radar.py --demo            # подбросить тестовую «горячую» новость (для показа)
     python news_radar.py --reset-db        # стереть историю и начать с чистого листа
 
+Команды бота в Telegram (работают, пока радар запущен): /help /top /history /latest /sources /status /demo
+
 Настройки — в config.yaml (создаётся автоматически при первом запуске).
-Секреты (токен бота) — в файле .env, см. .env.
+Секреты (токен бота) — в файле .env, см. .env.example.
 """
 
 import argparse
@@ -23,6 +25,7 @@ import hashlib
 import html as html_mod
 import importlib.util
 import os
+import random
 import re
 import sqlite3
 import sys
@@ -76,6 +79,7 @@ HTML_PARSER = "lxml" if importlib.util.find_spec("lxml") else "html.parser"
 # Состояние источников для дашборда: {имя: {"time", "count", "error"}}
 SOURCE_STATUS = {}
 LAST_CYCLE = {"time": None}
+DEMO_SOURCE = "Демо-источник"  # демо-новости в истории не хранятся
 
 DEFAULT_CONFIG = r"""
 # ===== Настройки новостного радара =====
@@ -109,7 +113,7 @@ dup_threshold: 75
 # (чтобы редактору не прилетели старые). Для демо поставьте false.
 baseline_on_first_run: true
 
-# Telegram-бот: токен и chat_id ЛУЧШЕ хранить в файле .env (см. .env),
+# Telegram-бот: токен и chat_id ЛУЧШЕ хранить в файле .env (см. .env.example),
 # тогда сюда ничего вписывать не нужно. Без токена находки печатаются в консоль.
 telegram:
   bot_token: ""
@@ -350,6 +354,7 @@ def db_connect():
     ]:
         if name not in cols:
             conn.execute(f"ALTER TABLE items ADD COLUMN {name} {ddl}")
+    conn.execute("DELETE FROM items WHERE source = ?", (DEMO_SOURCE,))  # демо не должно жить в истории
     conn.commit()
     return conn
 
@@ -635,7 +640,7 @@ def score_item(item, cfg):
     if topic_score < cfg.get("min_topic_score", 6) and score > cap:
         score = cap  # Сургут упомянут, но событие неясно: в уведомления не пускаем
         why.append(f"нет значимой темы, потолок {cap}")
-    return round(max(score, 0), 1), cat, "; ".join(why)
+    return round(min(max(score, 0), 100), 1), cat, "; ".join(why)  # шкала 0..100
 
 
 # ----------------------------------------------------------------------------- #
@@ -684,23 +689,44 @@ def format_alert(item):
 
 
 def telegram_creds(cfg):
-    # Секреты лучше хранить в .env, а не в config.yaml (см. .env)
+    # Секреты лучше хранить в .env, а не в config.yaml (см. .env.example)
     tg = cfg.get("telegram") or {}
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or tg.get("bot_token", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID") or tg.get("chat_id", "")
     return str(token or "").strip(), str(chat_id or "").strip()
 
 
-def send_telegram(cfg, text):
-    """None — бот не настроен; 'ok' — доставлено; 'stop' — временный сбой (повторим позже);
-    'skip' — Telegram отклонил сообщение насовсем (повторять бессмысленно)."""
-    token, chat_id = telegram_creds(cfg)
-    if not (token and chat_id):
-        return None
+# Кнопки под полем ввода в Telegram: нажатие отправляет боту текст кнопки
+KEYBOARD = {
+    "keyboard": [
+        [{"text": "🏆 Топ"}, {"text": "🕘 История"}],
+        [{"text": "🛰 Источники"}, {"text": "📊 Статус"}],
+        [{"text": "🧪 Проверка"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+BUTTONS = {
+    "🏆 Топ": "/top",
+    "🕘 История": "/history",
+    "🛰 Источники": "/sources",
+    "📊 Статус": "/status",
+    "🧪 Проверка": "/demo",
+}
+
+
+def telegram_chat_ids(cfg):
+    """В TELEGRAM_CHAT_ID можно указать нескольких получателей через запятую."""
+    _, raw = telegram_creds(cfg)
+    return [x for x in re.split(r"[,\s;]+", raw) if x]
+
+
+def _send_one(token, chat_id, text, preview):
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False},
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                  "disable_web_page_preview": not preview, "reply_markup": KEYBOARD},
             timeout=15,
         )
     except requests.RequestException as e:
@@ -708,8 +734,22 @@ def send_telegram(cfg, text):
         return "stop"
     if r.status_code == 200:
         return "ok"
-    print(f"[warn] Telegram вернул {r.status_code}: {r.text[:160]}")
+    print(f"[warn] Telegram вернул {r.status_code} для чата {chat_id}: {r.text[:160]}")
     return "stop" if r.status_code == 429 or r.status_code >= 500 else "skip"
+
+
+def send_telegram(cfg, text, preview=True, to=None):
+    """None — бот не настроен; 'ok' — доставлено хотя бы одному получателю;
+    'stop' — временный сбой (повторим позже); 'skip' — Telegram отклонил насовсем.
+    to — отправить только в этот чат (так бот отвечает на команды)."""
+    token, _ = telegram_creds(cfg)
+    ids = [str(to)] if to else telegram_chat_ids(cfg)
+    if not (token and ids):
+        return None
+    results = [_send_one(token, cid, text, preview) for cid in ids]
+    if "ok" in results:
+        return "ok"
+    return "stop" if "stop" in results else "skip"
 
 
 def notify(cfg, items):
@@ -825,7 +865,7 @@ class DashHandler(BaseHTTPRequestHandler):
             return f"<span class='b {cls}'>{score:.0f}</span>"
 
         rows_html = "".join(
-            f"<tr><td>{esc(f)}</td><td>{badge(s)}</td><td>{esc(c or '')}</td><td>{esc(src)}</td>"
+            f"<tr><td>{esc(_found_time(f))}</td><td>{badge(s)}</td><td>{esc(c or '')}</td><td>{esc(src)}</td>"
             f"<td>{n}</td><td><a href='{esc(u, quote=True)}' target='_blank'>{esc(t[:140])}</a>"
             f"<div class='why'>{esc(w or '')}</div></td></tr>"
             for f, s, c, src, t, u, n, w, _summary in rows
@@ -872,6 +912,180 @@ def start_dashboard():
 # ----------------------------------------------------------------------------- #
 #  Цикл: сбор -> отбор -> уведомление
 # ----------------------------------------------------------------------------- #
+
+# ----------------------------------------------------------------------------- #
+#  Команды бота в Telegram: /top /history /sources /status /help
+# ----------------------------------------------------------------------------- #
+
+def _found_time(ts):
+    """found_at хранится по времени компьютера; показываем по времени Сургута."""
+    try:
+        return datetime.fromisoformat(ts).astimezone(LOCAL_TZ).strftime("%d.%m %H:%M")
+    except (TypeError, ValueError):
+        return ts or ""
+
+
+def _icon(score):
+    return "🔥" if score >= 60 else ("❗" if score >= 45 else "ℹ️")
+
+
+def _list_items(rows):
+    esc = html_mod.escape
+    blocks = []
+    for found_at, score, category, source, title, url, conf in rows:
+        mark = f" · ✅×{conf}" if conf and conf > 1 else ""
+        blocks.append(
+            f"{_icon(score)} <b>{score:.0f}</b> · {esc(category or '—')}{mark}\n"
+            f"<a href=\"{esc(url, quote=True)}\">{esc(shorten(title, 110))}</a>\n"
+            f"<i>{esc(source)} · {_found_time(found_at)}</i>"
+        )
+    return "\n\n".join(blocks)
+
+
+BOT_COMMANDS = [
+    ("top", "Топ новостей за сутки по баллам (/top 10)"),
+    ("history", "Вся история по убыванию баллов (/history 15)"),
+    ("latest", "Самые свежие находки по времени"),
+    ("sources", "Источники, приоритеты и их состояние"),
+    ("demo", "Тестовое уведомление (проверка связи)"),
+    ("status", "Состояние радара и настройки"),
+    ("help", "Список команд"),
+]
+
+BOT_HELP = (
+    "📡 <b>Новостной радар Сургута и Югры</b>\n"
+    "Сам присылаю важные новости. А ещё умею:\n\n"
+    + "\n".join(f"/{c} — {d}" for c, d in BOT_COMMANDS)
+)
+
+
+def bot_reply(cfg, command):
+    """Готовит ответ на команду бота. Данные берём из той же базы, что и дашборд."""
+    esc = html_mod.escape
+    parts = command.split()
+    cmd = parts[0].split("@")[0].lower()
+    arg = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None  # например /top 10
+    if cmd in ("/start", "/help"):
+        return BOT_HELP
+    if cmd == "/demo":
+        return format_alert(make_demo_item(cfg))
+    conn = db_connect()
+    try:
+        cols = "found_at, score, category, source, title, url, confirmations"
+        if cmd == "/top":
+            n = min(arg or 5, 10)
+            since = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+            rows = conn.execute(
+                f"SELECT {cols} FROM items WHERE found_at >= ? ORDER BY score DESC, found_at DESC LIMIT ?",
+                (since, n),
+            ).fetchall()
+            if not rows:
+                return "За последние сутки находок пока нет."
+            return f"🏆 <b>Топ-{len(rows)} за сутки (по баллам)</b>\n\n" + _list_items(rows)
+        if cmd == "/history":
+            n = min(arg or 10, 20)
+            rows = conn.execute(
+                f"SELECT {cols} FROM items ORDER BY score DESC, found_at DESC LIMIT ?", (n,)
+            ).fetchall()
+            if not rows:
+                return "История пока пуста."
+            return f"🕘 <b>История: {len(rows)} лучших находок по баллам</b>\n\n" + _list_items(rows)
+        if cmd == "/latest":
+            n = min(arg or 10, 20)
+            rows = conn.execute(
+                f"SELECT {cols} FROM items ORDER BY found_at DESC, score DESC LIMIT ?", (n,)
+            ).fetchall()
+            if not rows:
+                return "История пока пуста."
+            rows.sort(key=lambda r: -r[1])  # внутри свежей десятки — по убыванию баллов
+            return f"🆕 <b>Последние {len(rows)} находок</b>\n\n" + _list_items(rows)
+        if cmd == "/sources":
+            lines = []
+            for src in cfg.get("sources", []):
+                st = SOURCE_STATUS.get(src["name"])
+                if not src.get("enabled", True):
+                    icon, info = "⏸", "выключен"
+                elif not st:
+                    icon, info = "⏳", "ещё не проверялся"
+                elif st["error"]:
+                    icon, info = "⚠️", "ошибка"
+                else:
+                    icon, info = "✅", f"записей: {st['count']}, проверен {st['time']}"
+                lines.append(
+                    f"{icon} <b>{esc(src['name'])}</b>\n"
+                    f"    приоритет {src.get('priority', 3)}/5 · {esc(info)}"
+                )
+            return "🛰 <b>Источники</b>\n\n" + "\n".join(lines)
+        if cmd == "/status":
+            total = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+            min_score = cfg.get("notify_min_score", 35)
+            important = conn.execute("SELECT COUNT(*) FROM items WHERE score >= ?", (min_score,)).fetchone()[0]
+            enabled = sum(1 for s in cfg.get("sources", []) if s.get("enabled", True))
+            return (
+                "📊 <b>Состояние радара</b>\n"
+                f"Последняя проверка: {esc(LAST_CYCLE['time'] or '—')}\n"
+                f"Проверка каждые {cfg.get('interval_minutes', 15)} мин, источников включено: {enabled}\n"
+                f"Находок в истории: {total}, из них важных (от {min_score} баллов): {important}"
+            )
+    finally:
+        conn.close()
+    return "Не знаю такую команду. Список команд: /help"
+
+
+def bot_commands_loop(cfg):
+    """Слушает команды редактора в Telegram. Отвечает только в чат из .env."""
+    token, _ = telegram_creds(cfg)
+    allowed = set(telegram_chat_ids(cfg))
+    if not (token and allowed):
+        return
+    api = f"https://api.telegram.org/bot{token}"
+    offset, warned = None, False
+    try:
+        # пропускаем старые сообщения, чтобы не отвечать на то, что написали до запуска
+        old = requests.get(f"{api}/getUpdates", params={"offset": -1}, timeout=15).json().get("result", [])
+        if old:
+            offset = old[-1]["update_id"] + 1
+        requests.post(
+            f"{api}/setMyCommands",
+            json={"commands": [{"command": c, "description": d} for c, d in BOT_COMMANDS]},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        print(f"[warn] Команды бота: не удалось подключиться: {e}")
+    print("[bot] Слушаю команды в Telegram (/help)")
+    send_telegram(cfg, "📡 <b>Радар запущен.</b> Кнопки внизу покажут топ, историю и состояние. "
+                       "«🧪 Проверка» пришлёт тестовое уведомление.", preview=False)
+    while True:
+        try:
+            params = {"timeout": 30, "allowed_updates": '["message"]'}
+            if offset:
+                params["offset"] = offset
+            r = requests.get(f"{api}/getUpdates", params=params, timeout=45)
+            if r.status_code != 200:
+                if not warned:
+                    print(f"[warn] Команды бота: Telegram вернул {r.status_code}")
+                    warned = True
+                time.sleep(10)
+                continue
+            warned = False
+            for upd in r.json().get("result", []):
+                offset = upd["update_id"] + 1
+                msg = upd.get("message") or {}
+                text = (msg.get("text") or "").strip()
+                asker = str((msg.get("chat") or {}).get("id"))
+                text = BUTTONS.get(text, text)  # нажатая кнопка = команда
+                if asker not in allowed or not text.startswith("/"):
+                    continue  # чужие чаты и обычные сообщения игнорируем
+                if text.split()[0].split("@")[0].lower() == "/demo":
+                    send_demo(cfg, to=asker)  # проверка: тестовое уведомление тому, кто нажал
+                    continue
+                send_telegram(cfg, bot_reply(cfg, text), preview=False, to=asker)
+        except requests.RequestException:
+            time.sleep(10)
+        except Exception as e:
+            print(f"[warn] Команды бота: {e}")
+            time.sleep(10)
+
 
 def run_cycle(cfg):
     conn = db_connect()
@@ -955,24 +1169,45 @@ def run_cycle(cfg):
 #  Вспомогательные команды
 # ----------------------------------------------------------------------------- #
 
-def run_demo(cfg):
-    """Подбрасывает тестовую «горячую» новость и показывает её так же, как настоящую."""
+DEMO_SCENARIOS = [
+    ("В Сургуте горит жилой дом на улице Энергетиков, эвакуированы жильцы",
+     "Тестовая новость для демонстрации радара: пожар, эвакуация, есть пострадавшие."),
+    ("В Сургуте на Югорском тракте массовое ДТП, движение перекрыто",
+     "Тестовая новость для демонстрации радара: авария, пострадавшие, организован объезд."),
+    ("В Сургуте из-за аварии на теплотрассе отключено отопление в нескольких домах",
+     "Тестовая новость для демонстрации радара: коммунальная авария, жильцы остались без тепла."),
+]
+
+
+def make_demo_item(cfg):
+    """Тестовая «горячая» новость. Оценивается настоящим алгоритмом, но в базу не попадает."""
     stamp = datetime.now(LOCAL_TZ).strftime("%H:%M:%S")
+    title, summary = random.choice(DEMO_SCENARIOS)
     raw = {
-        "title": f"ДЕМО: В Сургуте горит жилой дом на улице Энергетиков, эвакуированы жильцы ({stamp})",
+        "title": f"ДЕМО: {title} ({stamp})",
         "url": "https://siapress.ru/",
-        "summary": "Тестовая новость для демонстрации радара: пожар, эвакуация, есть пострадавшие.",
+        "summary": summary,
         "published": datetime.now(timezone.utc).isoformat(),
     }
     score, cat, why = score_item({**raw, "source_priority": 5, "geo_hint": "сургут"}, cfg)
-    conn = db_connect()
-    save_item(conn, {
-        "url_hash": make_hash(raw["url"], raw["title"]), "url": raw["url"], "source": "Демо-источник",
-        "title": raw["title"], "summary": raw["summary"], "category": cat, "score": score, "why": why,
-        "published": raw["published"], "confirmations": 1, "also_in": [], "notified": 0,
-    })
-    deliver_pending(conn, cfg)
-    conn.close()
+    return {
+        "url_hash": "demo", "url": raw["url"], "source": DEMO_SOURCE, "title": raw["title"],
+        "summary": raw["summary"], "category": cat, "score": score, "why": why,
+        "published": raw["published"], "confirmations": 1, "also_in": [],
+    }
+
+
+def send_demo(cfg, to=None):
+    """Проверка связи: тестовое уведомление (в историю не попадает). to — только этому чату."""
+    msg = format_alert(make_demo_item(cfg))
+    print("\n" + re.sub(r"<[^>]+>", "", html_mod.unescape(msg)))
+    return send_telegram(cfg, msg, to=to)
+
+
+def run_demo(cfg):
+    """Отправляет тестовую новость всем получателям. В историю и дашборд она не попадает."""
+    notify(cfg, [make_demo_item(cfg)])
+    print("[demo] Готово. В историю демо-новость не сохраняется.")
 
 
 def run_test_telegram(cfg):
@@ -993,6 +1228,10 @@ def main():
     parser.add_argument("--reset-db", action="store_true", help="стереть историю находок")
     args = parser.parse_args()
 
+    if sys.stdout is None or sys.stderr is None:  # запуск без окна консоли (pythonw): пишем в radar.log
+        log = open(BASE_DIR / "radar.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = log
+
     if args.reset_db:
         DB_PATH.unlink(missing_ok=True)
         print("[reset] История стёрта.")
@@ -1007,6 +1246,8 @@ def main():
         return
     if args.dashboard:
         start_dashboard()
+    if not args.once or args.dashboard:  # команды бота работают, пока радар не закрыт
+        Thread(target=bot_commands_loop, args=(cfg,), daemon=True).start()
 
     try:
         if args.once:

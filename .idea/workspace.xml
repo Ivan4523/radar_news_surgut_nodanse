@@ -4,13 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="5880f047-c05a-482d-9b53-1f96b0668126" name="Changes" comment="first try">
-      <change afterPath="$PROJECT_DIR$/env" afterDir="false" />
+    <list default="true" id="5880f047-c05a-482d-9b53-1f96b0668126" name="Changes" comment="finall try">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/config.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/news_radar.py" beforeDir="false" afterPath="$PROJECT_DIR$/news_radar.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/radar_history.db" beforeDir="false" afterPath="$PROJECT_DIR$/radar_history.db" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -92,7 +89,23 @@
       <option name="project" value="LOCAL" />
       <updated>1794646027238</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="finall try">
+      <option name="closed" value="true" />
+      <created>1794651683460</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1794651683460</updated>
+    </task>
+    <task id="LOCAL-00003" summary="finall try">
+      <option name="closed" value="true" />
+      <created>1794651701351</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1794651701351</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -108,6 +121,7 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="first try" />
-    <option name="LAST_COMMIT_MESSAGE" value="first try" />
+    <MESSAGE value="finall try" />
+    <option name="LAST_COMMIT_MESSAGE" value="finall try" />
   </component>
 </project>
