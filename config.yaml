@@ -6,14 +6,31 @@ interval_minutes: 15
 # Минимальный балл, начиная с которого редактору приходит уведомление
 notify_min_score: 35
 
+# Отбор по теме: если в тексте нет достаточно «новостных» слов (сумма баллов темы
+# меньше min_topic_score), балл не поднимается выше no_topic_cap. Это отсекает
+# афиши, поздравления и прочие записи, где просто упомянут Сургут.
+min_topic_score: 6
+no_topic_cap: 30
+
 # Сколько дней хранить и учитывать историю при удалении дублей
 history_days: 7
 
 # Уникальных находок в одном уведомлении (анти-спам пачками)
 max_alerts_per_cycle: 10
 
-# Telegram-бот: создайте бота через @BotFather, вставьте токен и chat_id
-# Пока токена нет — находки печатаются в консоль и видны на дашборде.
+# Сколько часов ждать, если Telegram временно недоступен: неотправленные находки
+# уйдут при следующей проверке (а не потеряются)
+pending_hours: 12
+
+# Как считать «тот же новостной повод» (0-100): чем выше, тем строже
+dup_threshold: 75
+
+# Первый запуск только запоминает текущие новости и не шлёт уведомления
+# (чтобы редактору не прилетели старые). Для демо поставьте false.
+baseline_on_first_run: true
+
+# Telegram-бот: токен и chat_id храним в файле .env (см. .env),
+# сюда ничего вписывать не нужно. Без токена находки печатаются в консоль.
 telegram:
   bot_token: ""
   chat_id: ""
@@ -41,6 +58,7 @@ categories:
       - {word: "дтп", w: 10}
       - {word: "авария", w: 10}
       - {word: "эвакуац", w: 12}
+      - {word: "эвакуир", w: 12}
       - {word: "погиб", w: 14}
       - {word: "пострадал", w: 12}
       - {word: "пропал", w: 10}
@@ -48,6 +66,29 @@ categories:
       - {word: "отключен", w: 7}
       - {word: "энергосб", w: 7}
       - {word: "разлив нефт", w: 12}
+      - {word: "взрыв", w: 14}
+      - {word: "обрушен", w: 12}
+      - {word: "подтоплен", w: 10}
+      - {word: "паводок", w: 10}
+      - {word: "метел", w: 6}
+      - {word: "аномальн", w: 8}
+      - {word: "ограничен", w: 5}
+  "Правопорядок":
+    weight: 1.3
+    words:
+      - {word: "задержа", w: 10}
+      - {word: "полици", w: 6}
+      - {word: "следственн", w: 8}
+      - {word: "возбужд", w: 9}
+      - {word: "уголовн", w: 9}
+      - {word: "приговор", w: 9}
+      - {word: "суд", w: 6}
+      - {word: "наркот", w: 9}
+      - {word: "мошенн", w: 9}
+      - {word: "убийств", w: 14}
+      - {word: "ограблен", w: 10}
+      - {word: "подозреваем", w: 6}
+      - {word: "краж", w: 7}
   "Власть и решения":
     weight: 1.2
     words:
@@ -97,32 +138,64 @@ categories:
       - {word: "эпидем", w: 8}
       - {word: "субсиди", w: 6}
 
+# Штрафы за «шум»: дайджесты, афиши, поздравления, конкурсы и советы обычно
+# не повод для срочного материала.
+# Отрицательное число вычитается из балла (слово ищется с начала слова).
+noise_words:
+  # --- старые ---
+  - {word: "за неделю", w: -20}
+  - {word: "дайджест", w: -20}
+  - {word: "итоги недели", w: -20}
+  - {word: "куда сходить", w: -20}
+  - {word: "афиша", w: -15}
+  - {word: "поздравл", w: -15}
+  - {word: "график работы", w: -10}
+  - {word: "режим работы", w: -10}
+  # --- новые (убирают ложные срабатывания вроде «турнир среди пожарных») ---
+  - {word: "турнир", w: -25}
+  - {word: "конкурс", w: -20}
+  - {word: "фестивал", w: -20}
+  - {word: "как провести", w: -25}
+  - {word: "советы", w: -20}
+  - {word: "викторин", w: -20}
+
 # Источники. type: rss | html | telegram
-# Приоритет источника 1..5 — множитель важности (фактически добавляет priority*3 к баллу).
+# priority 1..5: добавляет priority*3 к баллу.
+# geo_hint: базовая география источника (ключ из geo_weights), если в тексте нет названия города.
 sources:
   - name: СИА-ПРЕСС (RSS)
     type: rss
     url: https://siapress.ru/rss
+    geo_hint: югра
     priority: 5
     enabled: true
 
-  - name: Администрация Сургута
-    type: html
-    url: https://www.admsurgut.ru/press/news/
-    item_selector: ".news-list-item a, .news-item a, a[href*='/news/']"
+  - name: Администрация Сургута (RSS)
+    type: rss
+    url: https://admsurgut.ru/bitrix/rss.php?ID=45&LANG=s1&TYPE=news&LIMIT=20
+    geo_hint: сургут
     priority: 5
     enabled: true
 
   - name: Правительство ХМАО — Югры
     type: html
-    url: https://www.admhmao.ru/press/news/
-    item_selector: ".news-item a, a[href*='/press/']"
+    url: https://admhmao.ru/news/
+    geo_hint: югра
+    item_selector: "a[href^='/news/']"
+    priority: 4
+    enabled: false   # сайт отвечает ошибкой 447; Югру читаем через Telegram ниже
+
+  - name: Правительство Югры (Telegram)
+    type: telegram
+    url: https://t.me/s/ugra_official
+    geo_hint: югра
     priority: 4
     enabled: true
 
   - name: Мэрия Сургута (Telegram)
     type: telegram
     url: https://t.me/s/admsurgut
+    geo_hint: сургут
     priority: 5
     enabled: true
 
