@@ -315,7 +315,7 @@ sources:
     geo_hint: сургут
     priority: 5
     trust: 5
-    enabled: true
+    enabled: False
 
   - name: Мэрия Сургута (Telegram)
     type: telegram
