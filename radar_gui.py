@@ -198,7 +198,7 @@ def read_stats(threshold):
         conn = sqlite3.connect(nr.DB_PATH)
         total = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         important = conn.execute("SELECT COUNT(*) FROM items WHERE score >= ?", (threshold,)).fetchone()[0]
-        since = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+        since = nr.now_iso(hours=24)
         day = conn.execute("SELECT COUNT(*) FROM items WHERE found_at >= ?", (since,)).fetchone()[0]
         conn.close()
         return total, important, day
